@@ -1,9 +1,9 @@
-use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+use serde::Deserialize;
 use winreg::enums::*;
 use winreg::RegKey;
 
@@ -11,8 +11,19 @@ const INSTALL_DIR: &str = "C:\\Program Files\\backuptracker";
 const JAR_NAME: &str = "backuptracker.jar";
 const BAT_NAME: &str = "backuptracker.bat";
 
+// GitHub API endpoint
+const RELEASE_API: &str =
+    "https://api.github.com/repos/mtchs-code-intern/backup-tracker/releases/latest";
+
 fn main() {
     println!("Starting BackupTracker installer...");
+
+    // 🔴 Enforce admin
+    if !is_elevated() {
+        println!("Requesting administrator privileges...");
+        relaunch_as_admin();
+        return;
+    }
 
     if !is_java_installed() {
         eprintln!("Java is not installed or not in PATH.");
@@ -30,7 +41,7 @@ fn main() {
 
 fn run_install() -> io::Result<()> {
     create_install_dir()?;
-    copy_jar()?;
+    download_latest_jar()?;
     create_bat()?;
     add_to_path()?;
     Ok(())
@@ -40,7 +51,7 @@ fn is_java_installed() -> bool {
     Command::new("java")
         .arg("-version")
         .output()
-        .map(|output| output.status.success())
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
@@ -57,30 +68,94 @@ fn create_install_dir() -> io::Result<()> {
     Ok(())
 }
 
-fn copy_jar() -> io::Result<()> {
-    println!("Copying JAR file...");
+//
+// 🔴 Elevation logic
+//
+fn is_elevated() -> bool {
+    Command::new("net")
+        .arg("session")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
-    // Get current executable directory
-    let exe_path = env::current_exe()?;
-    let exe_dir = exe_path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Other, "Failed to get executable directory")
-    })?;
+fn relaunch_as_admin() {
+    let exe = std::env::current_exe().expect("Failed to get current exe");
 
-    let source = exe_dir.join(JAR_NAME);
+    Command::new("powershell")
+        .args([
+            "-Command",
+            &format!(
+                "Start-Process -FilePath '{}' -Verb RunAs",
+                exe.display()
+            ),
+        ])
+        .spawn()
+        .expect("Failed to relaunch as admin");
+}
+
+//
+// 🔴 GitHub release structures
+//
+#[derive(Deserialize)]
+struct Release {
+    assets: Vec<Asset>,
+}
+
+#[derive(Deserialize)]
+struct Asset {
+    name: String,
+    browser_download_url: String,
+}
+
+//
+// 🔴 Download latest JAR
+//
+fn download_latest_jar() -> io::Result<()> {
+    println!("Downloading latest release from GitHub...");
+
+    let client = reqwest::blocking::Client::new();
+
+    let release: Release = client
+        .get(RELEASE_API)
+        .header("User-Agent", "backuptracker-installer")
+        .send()
+        .map_err(to_io_error)?
+        .json()
+        .map_err(to_io_error)?;
+
+    let jar_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name.ends_with(".jar"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No JAR asset found"))?;
+
+    println!("Found asset: {}", jar_asset.name);
+
+    let bytes = client
+        .get(&jar_asset.browser_download_url)
+        .send()
+        .map_err(to_io_error)?
+        .bytes()
+        .map_err(to_io_error)?;
+
     let dest = Path::new(INSTALL_DIR).join(JAR_NAME);
 
-    if !source.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{} not found next to installer", JAR_NAME),
-        ));
-    }
+    // ✅ FIX: borrow instead of move
+    fs::write(&dest, &bytes)?;
 
-    fs::copy(source, dest)?;
+    println!("Downloaded to {}", dest.display());
 
     Ok(())
 }
 
+fn to_io_error<E: std::fmt::Display>(e: E) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, e.to_string())
+}
+
+//
+// 🔴 BAT launcher
+//
 fn create_bat() -> io::Result<()> {
     println!("Creating launcher...");
 
@@ -88,14 +163,16 @@ fn create_bat() -> io::Result<()> {
     let mut file = File::create(bat_path)?;
 
     let contents = r#"@echo off
-java -jar "%~dp0backuptracker.jar"
+java -jar "C:\Program Files\backuptracker\backuptracker.jar" %*
 "#;
 
     file.write_all(contents.as_bytes())?;
-
     Ok(())
 }
 
+//
+// 🔴 PATH update
+//
 fn add_to_path() -> io::Result<()> {
     println!("Adding install directory to PATH...");
 
@@ -112,7 +189,7 @@ fn add_to_path() -> io::Result<()> {
         };
 
         env.set_value("PATH", &new_path)?;
-        println!("PATH updated. You may need to restart your terminal.");
+        println!("PATH updated. Restart terminal to apply.");
     } else {
         println!("PATH already contains install directory.");
     }
