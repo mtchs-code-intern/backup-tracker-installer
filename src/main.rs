@@ -7,36 +7,59 @@ use serde::Deserialize;
 use winreg::enums::*;
 use winreg::RegKey;
 
+use rfd::{MessageButtons, MessageDialog, MessageLevel};
+
 const INSTALL_DIR: &str = "C:\\Program Files\\backuptracker";
 const JAR_NAME: &str = "backuptracker.jar";
 const BAT_NAME: &str = "backuptracker.bat";
 
-// GitHub API endpoint
 const RELEASE_API: &str =
     "https://api.github.com/repos/mtchs-code-intern/backup-tracker/releases/latest";
 
 fn main() {
-    println!("Starting BackupTracker installer...");
-
-    // 🔴 Enforce admin
+    // 🔴 Elevation
     if !is_elevated() {
-        println!("Requesting administrator privileges...");
         relaunch_as_admin();
         return;
     }
 
+    // 🔴 Java check
     if !is_java_installed() {
-        eprintln!("Java is not installed or not in PATH.");
-        eprintln!("Please install Java and re-run this installer.");
+        MessageDialog::new()
+            .set_level(MessageLevel::Error)
+            .set_title("Java Required")
+            .set_description(
+                "Java is not installed or not in PATH.\n\nThe download page will open now.",
+            )
+            .set_buttons(MessageButtons::Ok)
+            .show();
+
+        let _ = Command::new("cmd")
+            .args(["/C", "start https://www.java.com/en/download/"])
+            .spawn();
+
         return;
     }
 
-    if let Err(e) = run_install() {
-        eprintln!("Installation failed: {}", e);
-        return;
+    // 🔴 Run install
+    match run_install() {
+        Ok(_) => {
+            MessageDialog::new()
+                .set_level(MessageLevel::Info)
+                .set_title("Success")
+                .set_description("BackupTracker installed successfully!")
+                .set_buttons(MessageButtons::Ok)
+                .show();
+        }
+        Err(e) => {
+            MessageDialog::new()
+                .set_level(MessageLevel::Error)
+                .set_title("Installation Failed")
+                .set_description(&format!("Installation failed:\n\n{}", e))
+                .set_buttons(MessageButtons::Ok)
+                .show();
+        }
     }
-
-    println!("Installation completed successfully!");
 }
 
 fn run_install() -> io::Result<()> {
@@ -59,17 +82,14 @@ fn create_install_dir() -> io::Result<()> {
     let path = Path::new(INSTALL_DIR);
 
     if !path.exists() {
-        println!("Creating install directory...");
         fs::create_dir_all(path)?;
-    } else {
-        println!("Install directory already exists.");
     }
 
     Ok(())
 }
 
 //
-// 🔴 Elevation logic
+// 🔴 Elevation
 //
 fn is_elevated() -> bool {
     Command::new("net")
@@ -82,20 +102,28 @@ fn is_elevated() -> bool {
 fn relaunch_as_admin() {
     let exe = std::env::current_exe().expect("Failed to get current exe");
 
-    Command::new("powershell")
+    let status = Command::new("powershell")
         .args([
             "-Command",
             &format!(
-                "Start-Process -FilePath '{}' -Verb RunAs",
+                "Start-Process -FilePath '{}' -Verb RunAs -Wait",
                 exe.display()
             ),
         ])
-        .spawn()
-        .expect("Failed to relaunch as admin");
+        .status();
+
+    if status.is_err() {
+        MessageDialog::new()
+            .set_level(MessageLevel::Error)
+            .set_title("Elevation Failed")
+            .set_description("Failed to request administrator privileges.")
+            .set_buttons(MessageButtons::Ok)
+            .show();
+    }
 }
 
 //
-// 🔴 GitHub release structures
+// 🔴 GitHub structs
 //
 #[derive(Deserialize)]
 struct Release {
@@ -109,11 +137,9 @@ struct Asset {
 }
 
 //
-// 🔴 Download latest JAR
+// 🔴 Download JAR
 //
 fn download_latest_jar() -> io::Result<()> {
-    println!("Downloading latest release from GitHub...");
-
     let client = reqwest::blocking::Client::new();
 
     let release: Release = client
@@ -130,8 +156,6 @@ fn download_latest_jar() -> io::Result<()> {
         .find(|a| a.name.ends_with(".jar"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No JAR asset found"))?;
 
-    println!("Found asset: {}", jar_asset.name);
-
     let bytes = client
         .get(&jar_asset.browser_download_url)
         .send()
@@ -140,11 +164,7 @@ fn download_latest_jar() -> io::Result<()> {
         .map_err(to_io_error)?;
 
     let dest = Path::new(INSTALL_DIR).join(JAR_NAME);
-
-    // ✅ FIX: borrow instead of move
     fs::write(&dest, &bytes)?;
-
-    println!("Downloaded to {}", dest.display());
 
     Ok(())
 }
@@ -157,8 +177,6 @@ fn to_io_error<E: std::fmt::Display>(e: E) -> io::Error {
 // 🔴 BAT launcher
 //
 fn create_bat() -> io::Result<()> {
-    println!("Creating launcher...");
-
     let bat_path = Path::new(INSTALL_DIR).join(BAT_NAME);
     let mut file = File::create(bat_path)?;
 
@@ -174,8 +192,6 @@ java -jar "C:\Program Files\backuptracker\backuptracker.jar" %*
 // 🔴 PATH update
 //
 fn add_to_path() -> io::Result<()> {
-    println!("Adding install directory to PATH...");
-
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)?;
 
@@ -189,9 +205,13 @@ fn add_to_path() -> io::Result<()> {
         };
 
         env.set_value("PATH", &new_path)?;
-        println!("PATH updated. Restart terminal to apply.");
-    } else {
-        println!("PATH already contains install directory.");
+
+        MessageDialog::new()
+            .set_level(MessageLevel::Info)
+            .set_title("PATH Updated")
+            .set_description("Restart your terminal to use BackupTracker.")
+            .set_buttons(MessageButtons::Ok)
+            .show();
     }
 
     Ok(())

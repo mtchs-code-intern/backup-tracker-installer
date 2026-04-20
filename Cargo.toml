@@ -2,8 +2,10 @@
 name = "backup-tracker-installer"
 version = "0.1.0"
 edition = "2024"
+#![windows_subsystem = "windows"]
 
 [dependencies]
-winreg = "0.52"
+rfd = "0.14"
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
+winreg = "0.52"
