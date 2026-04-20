@@ -17,20 +17,16 @@ const RELEASE_API: &str =
     "https://api.github.com/repos/mtchs-code-intern/backup-tracker/releases/latest";
 
 fn main() {
-    // 🔴 Elevation
     if !is_elevated() {
         relaunch_as_admin();
         return;
     }
 
-    // 🔴 Java check
     if !is_java_installed() {
         MessageDialog::new()
             .set_level(MessageLevel::Error)
             .set_title("Java Required")
-            .set_description(
-                "Java is not installed or not in PATH.\n\nThe download page will open now.",
-            )
+            .set_description("Java is not installed or not in PATH.\n\nOpening download page...")
             .set_buttons(MessageButtons::Ok)
             .show();
 
@@ -41,7 +37,6 @@ fn main() {
         return;
     }
 
-    // 🔴 Run install
     match run_install() {
         Ok(_) => {
             MessageDialog::new()
@@ -79,18 +74,14 @@ fn is_java_installed() -> bool {
 }
 
 fn create_install_dir() -> io::Result<()> {
-    let path = Path::new(INSTALL_DIR);
-
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-    }
-
+    fs::create_dir_all(INSTALL_DIR)?;
     Ok(())
 }
 
 //
-// 🔴 Elevation
-//
+// =======================
+// Elevation
+// =======================
 fn is_elevated() -> bool {
     Command::new("net")
         .arg("session")
@@ -102,29 +93,21 @@ fn is_elevated() -> bool {
 fn relaunch_as_admin() {
     let exe = std::env::current_exe().expect("Failed to get current exe");
 
-    let status = Command::new("powershell")
+    let _ = Command::new("powershell")
         .args([
             "-Command",
             &format!(
-                "Start-Process -FilePath '{}' -Verb RunAs -Wait",
+                "Start-Process -FilePath '{}' -Verb RunAs",
                 exe.display()
             ),
         ])
         .status();
-
-    if status.is_err() {
-        MessageDialog::new()
-            .set_level(MessageLevel::Error)
-            .set_title("Elevation Failed")
-            .set_description("Failed to request administrator privileges.")
-            .set_buttons(MessageButtons::Ok)
-            .show();
-    }
 }
 
 //
-// 🔴 GitHub structs
-//
+// =======================
+// GitHub structs
+// =======================
 #[derive(Deserialize)]
 struct Release {
     assets: Vec<Asset>,
@@ -137,8 +120,9 @@ struct Asset {
 }
 
 //
-// 🔴 Download JAR
-//
+// =======================
+// Download JAR
+// =======================
 fn download_latest_jar() -> io::Result<()> {
     let client = reqwest::blocking::Client::new();
 
@@ -164,7 +148,7 @@ fn download_latest_jar() -> io::Result<()> {
         .map_err(to_io_error)?;
 
     let dest = Path::new(INSTALL_DIR).join(JAR_NAME);
-    fs::write(&dest, &bytes)?;
+    fs::write(dest, &bytes)?;
 
     Ok(())
 }
@@ -174,8 +158,9 @@ fn to_io_error<E: std::fmt::Display>(e: E) -> io::Error {
 }
 
 //
-// 🔴 BAT launcher
-//
+// =======================
+// BAT launcher
+// =======================
 fn create_bat() -> io::Result<()> {
     let bat_path = Path::new(INSTALL_DIR).join(BAT_NAME);
     let mut file = File::create(bat_path)?;
@@ -189,30 +174,106 @@ java -jar "C:\Program Files\backuptracker\backuptracker.jar" %*
 }
 
 //
-// 🔴 PATH update
-//
+// =======================
+// PATH handling (FIXED)
+// =======================
 fn add_to_path() -> io::Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)?;
+    let install_path = INSTALL_DIR.to_string();
 
-    let current_path: String = env.get_value("PATH").unwrap_or_default();
+    // Try system PATH first
+    if let Ok(updated) = update_system_path(&install_path) {
+        if updated {
+            broadcast_env_change();
+            return Ok(());
+        }
+    }
 
-    if !current_path.contains(INSTALL_DIR) {
-        let new_path = if current_path.is_empty() {
-            INSTALL_DIR.to_string()
-        } else {
-            format!("{};{}", current_path, INSTALL_DIR)
-        };
-
-        env.set_value("PATH", &new_path)?;
-
-        MessageDialog::new()
-            .set_level(MessageLevel::Info)
-            .set_title("PATH Updated")
-            .set_description("Restart your terminal to use BackupTracker.")
-            .set_buttons(MessageButtons::Ok)
-            .show();
+    // Fallback to user PATH
+    let updated = update_user_path(&install_path)?;
+    if updated {
+        broadcast_env_change();
     }
 
     Ok(())
+}
+
+fn update_system_path(install_path: &str) -> io::Result<bool> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+
+    let path = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    let (key, _) = hklm.create_subkey_with_flags(path, KEY_READ | KEY_WRITE)?;
+
+    let current: String = key.get_value("Path").unwrap_or_default();
+
+    let mut parts: Vec<String> = current
+        .split(';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.iter().any(|p| p.eq_ignore_ascii_case(install_path)) {
+        return Ok(false);
+    }
+
+    parts.push(install_path.to_string());
+    key.set_value("Path", &parts.join(";"))?;
+
+    Ok(true)
+}
+
+fn update_user_path(install_path: &str) -> io::Result<bool> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu.create_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)?;
+
+    let current: String = key.get_value("Path").unwrap_or_default();
+
+    let mut parts: Vec<String> = current
+        .split(';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.iter().any(|p| p.eq_ignore_ascii_case(install_path)) {
+        return Ok(false);
+    }
+
+    parts.push(install_path.to_string());
+    key.set_value("Path", &parts.join(";"))?;
+
+    Ok(true)
+}
+
+fn broadcast_env_change() {
+    use std::ptr;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SendMessageTimeoutW(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: *const u16,
+            fuFlags: u32,
+            uTimeout: u32,
+            lpdwResult: *mut usize,
+        ) -> usize;
+    }
+
+    const HWND_BROADCAST: isize = 0xffff as isize;
+    const WM_SETTINGCHANGE: u32 = 0x001A;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+
+    let param: Vec<u16> = "Environment\0".encode_utf16().collect();
+
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            param.as_ptr(),
+            SMTO_ABORTIFHUNG,
+            200,
+            ptr::null_mut(),
+        );
+    }
 }
