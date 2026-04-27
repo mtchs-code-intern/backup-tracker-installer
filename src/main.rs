@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 use winreg::enums::*;
@@ -16,24 +16,21 @@ const BAT_NAME: &str = "backuptracker.bat";
 const RELEASE_API: &str =
     "https://api.github.com/repos/mtchs-code-intern/backup-tracker/releases/latest";
 
+const MIN_JAVA_MAJOR: u32 = 26;
+
 fn main() {
     if !is_elevated() {
         relaunch_as_admin();
         return;
     }
 
-    if !is_java_installed() {
+    if let Err(e) = ensure_java_installed() {
         MessageDialog::new()
             .set_level(MessageLevel::Error)
-            .set_title("Java Required")
-            .set_description("Java is not installed or not in PATH.\n\nOpening download page...")
+            .set_title("Java Installation Failed")
+            .set_description(&format!("Java 26 or newer is required.\n\n{}", e))
             .set_buttons(MessageButtons::Ok)
             .show();
-
-        let _ = Command::new("cmd")
-            .args(["/C", "start https://www.java.com/en/download/"])
-            .spawn();
-
         return;
     }
 
@@ -65,12 +62,148 @@ fn run_install() -> io::Result<()> {
     Ok(())
 }
 
-fn is_java_installed() -> bool {
-    Command::new("java")
+fn ensure_java_installed() -> io::Result<()> {
+    if let Some(version) = java_version_major()? {
+        if version >= MIN_JAVA_MAJOR {
+            return Ok(());
+        }
+    }
+
+    MessageDialog::new()
+        .set_level(MessageLevel::Info)
+        .set_title("Installing Java")
+        .set_description("Java 26 or newer is required. Installing Java automatically now...")
+        .set_buttons(MessageButtons::Ok)
+        .show();
+
+    if install_java()? {
+        if let Some(version) = java_version_major()? {
+            if version >= MIN_JAVA_MAJOR {
+                add_java_bin_to_path()?;
+                return Ok(());
+            }
+        }
+    }
+
+    MessageDialog::new()
+        .set_level(MessageLevel::Error)
+        .set_title("Java Required")
+        .set_description("Java 26 or newer is required. Please install Java manually from the download page.")
+        .set_buttons(MessageButtons::Ok)
+        .show();
+
+    let _ = Command::new("cmd")
+        .args(["/C", "start https://www.java.com/en/download/"])
+        .status();
+
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "Java 26 or newer is not available",
+    ))
+}
+
+fn java_version_major() -> io::Result<Option<u32>> {
+    let output = Command::new("java")
         .arg("-version")
-        .output()
-        .map(|o| o.status.success())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let text = String::from_utf8_lossy(&output.stderr);
+    for line in text.lines() {
+        if let Some(start) = line.find('"') {
+            if let Some(end) = line[start + 1..].find('"') {
+                let version_str = &line[start + 1..start + 1 + end];
+                let major = if version_str.starts_with("1.") {
+                    version_str
+                        .split('.')
+                        .nth(1)
+                        .and_then(|v| v.parse::<u32>().ok())
+                } else {
+                    version_str
+                        .split('.')
+                        .next()
+                        .and_then(|v| v.parse::<u32>().ok())
+                };
+                return Ok(major);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn install_java() -> io::Result<bool> {
+    if is_winget_available() {
+        let status = Command::new("winget")
+            .args([
+                "install",
+                "--id",
+                "Eclipse.Adoptium.Temurin.26.jre",
+                "-e",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ])
+            .status()?;
+
+        return Ok(status.success());
+    }
+
+    Ok(false)
+}
+
+fn is_winget_available() -> bool {
+    Command::new("winget")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn add_java_bin_to_path() -> io::Result<()> {
+    if let Some(java_bin) = locate_java_bin()? {
+        if let Ok(updated) = update_system_path(&java_bin) {
+            if updated {
+                broadcast_env_change();
+                return Ok(());
+            }
+        }
+        let updated = update_user_path(&java_bin)?;
+        if updated {
+            broadcast_env_change();
+        }
+    }
+    Ok(())
+}
+
+fn locate_java_bin() -> io::Result<Option<String>> {
+    let output = Command::new("where")
+        .arg("java")
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let first_path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+
+    if let Some(path) = first_path {
+        if let Some(parent) = path.parent() {
+            return Ok(Some(parent.to_string_lossy().to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 fn create_install_dir() -> io::Result<()> {
