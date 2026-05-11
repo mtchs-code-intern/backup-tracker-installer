@@ -93,7 +93,7 @@ fn ensure_java_installed() -> io::Result<()> {
         .show();
 
     let _ = Command::new("cmd")
-        .args(["/C", "start https://www.java.com/en/download/"])
+        .args(["/C", "start https://www.oracle.com/java/technologies/downloads/#jdk26-windows"])
         .status();
 
     Err(io::Error::new(
