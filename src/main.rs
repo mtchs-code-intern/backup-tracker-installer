@@ -12,9 +12,12 @@ use rfd::{MessageButtons, MessageDialog, MessageLevel};
 const INSTALL_DIR: &str = "C:\\Program Files\\backuptracker";
 const JAR_NAME: &str = "backuptracker.jar";
 const BAT_NAME: &str = "backuptracker.bat";
+const UPDATER_EXE_NAME: &str = "backup-tracker-updater.exe";
 
 const RELEASE_API: &str =
     "https://api.github.com/repos/mtchs-code-intern/backup-tracker/releases/latest";
+
+const UPDATER_RELEASE_API: &str = "https://api.github.com/repos/mtchs-code-intern/backup-tracker-updater/releases/latest";
 
 const MIN_JAVA_MAJOR: u32 = 26;
 
@@ -57,6 +60,7 @@ fn main() {
 fn run_install() -> io::Result<()> {
     create_install_dir()?;
     download_latest_jar()?;
+    download_latest_updater()?;
     create_bat()?;
     add_to_path()?;
     Ok(())
@@ -281,6 +285,36 @@ fn download_latest_jar() -> io::Result<()> {
         .map_err(to_io_error)?;
 
     let dest = Path::new(INSTALL_DIR).join(JAR_NAME);
+    fs::write(dest, &bytes)?;
+
+    Ok(())
+}
+
+fn download_latest_updater() -> io::Result<()> {
+    let client = reqwest::blocking::Client::new();
+
+    let release: Release = client
+        .get(UPDATER_RELEASE_API)
+        .header("User-Agent", "backuptracker-installer")
+        .send()
+        .map_err(to_io_error)?
+        .json()
+        .map_err(to_io_error)?;
+
+    let exe_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name.ends_with(".exe"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No EXE asset found"))?;
+
+    let bytes = client
+        .get(&exe_asset.browser_download_url)
+        .send()
+        .map_err(to_io_error)?
+        .bytes()
+        .map_err(to_io_error)?;
+
+    let dest = Path::new(INSTALL_DIR).join(UPDATER_EXE_NAME);
     fs::write(dest, &bytes)?;
 
     Ok(())
